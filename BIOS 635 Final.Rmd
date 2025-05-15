@@ -1,0 +1,862 @@
+---
+title: "BIOS 635 Final"
+author: "Kevin Sullivan"
+date: "2025-03-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Libraries
+
+library(dplyr)
+library(nnet)
+library(glmnet)
+library(caret)
+library(e1071)
+library(MASS)
+library(ISLR)
+library(boot)
+library(gam)
+library(combinat)
+library(class)
+library(knitr)
+library(kableExtra)
+library(htmltools)
+library(webshot)
+library(randomForest)
+library(xgboost)
+```
+
+**Clean Data**
+
+```{r}
+# Read in Data and Fix Data Error
+
+train_data = read.csv("train.csv")
+
+test_data = read.csv("test.csv")
+
+train_data = train_data %>%
+  rename(temperature = temparature)
+
+test_data = test_data %>%
+  rename(temperature = temparature)
+
+head(train_data)
+
+head(test_data)
+```
+
+**Data Pre-Processing and Feature Engineering**
+
+```{r}
+# Pre-Processing
+target = "rainfall"
+
+train_data[[target]] = as.factor(train_data[[target]])
+
+levels_train = levels(train_data[[target]])
+train_data[[target]] = factor(train_data[[target]], levels = levels_train)
+
+# Feature Engineering
+
+# Dew Point Depression
+
+train_data$dewpoint_dep = train_data$temperature - train_data$dewpoint
+test_data$dewpoint_dep = test_data$temperature - test_data$dewpoint
+
+# Temperature Range
+train_data$temp_range = train_data$maxtemp - train_data$mintemp
+test_data$temp_range = test_data$maxtemp - test_data$mintemp
+  
+# Humidity and Cloud Cover (Can Indicate a Storm Front)
+train_data$humid_cloud = train_data$humidity * train_data$cloud
+test_data$humid_cloud = test_data$humidity * test_data$cloud
+
+features = c("pressure", "maxtemp", "temperature", "mintemp", "dewpoint", "humidity", "cloud", "sunshine", "winddirection", "windspeed", "dewpoint_dep", "temp_range", "humid_cloud" )
+```
+
+```{r}
+# Split into Train and Validation
+set.seed(1829)
+train_index = createDataPartition(train_data[[target]], p = 0.7, list = FALSE)
+train_set = train_data[train_index, ]
+validation_set = train_data[-train_index, ]
+
+X_validation = as.matrix(validation_set)
+y_validation = validation_set[[target]]
+y_validation = as.factor(validation_set[[target]])
+
+
+train_set$rainfall = factor(train_set$rainfall, levels = c(0,1))
+validation_set$rainfall = factor(validation_set$rainfall, levels = c(0,1))
+
+levels_train = levels(train_data[[target]])
+validation_set[[target]] = factor(validation_set[[target]], levels = levels_train)
+```
+
+Overall Goal: Find model with lowest misclassification rate and least number of features (parsimonious and effective model)
+
+Analysis Plan: 
+
+1. Logistic regression
+-> All possible combinations of features
+
+2. KNN
+-> K {1, 2 , ... 100}
+
+3. LDA, QDA, Naive Bayes
+
+4. Lasso and Ridge Regression
+
+5. Random Forest
+
+6. XGBoost
+
+
+**Logistic Regression**
+```{r, eval= FALSE}
+# Iterate Through All Possible Combinations of Features
+
+feature_combinations = list()
+
+for (i in 1:length(features)) {
+  feature_combinations = c(feature_combinations, combn(features, i, simplify = FALSE))
+}
+
+results = data.frame(model = character(), misclassification_rate = numeric(), stringsAsFactors = FALSE)
+
+for (comb in feature_combinations) {
+  
+  formula = as.formula(paste(target, "~", paste(comb, collapse = " + ")))
+  
+  model = glm(formula, data = train_set, family = binomial())
+  
+  predictions = predict(model, type = "response")
+  predicted_classes = ifelse(predictions > 0.5, 1, 0)
+  
+  confusion = confusionMatrix(as.factor(predicted_classes), train_set[[target]])
+  misclassification_rate = 1 - confusion$overall['Accuracy']
+  
+  results = rbind(results, data.frame(model = paste(comb, collapse = ", "), misclassification_rate = misclassification_rate))
+}
+```
+
+
+```{r}
+# Find Best Model (lowest misclassification error)
+
+best_logistic_model = results[which.min(results$misclassification_rate), ]
+print(best_logistic_model)
+
+best_logistic_model_fit = glm(rainfall ~ maxtemp + sunshine + humid_cloud, data = train_data, family = "binomial")
+
+summary(best_logistic_model_fit)
+```
+
+**KNN**
+
+```{r}
+all_predictors = setdiff(names(train_set), "rainfall")
+
+results_list = list()
+
+for (subset_size in 1:12) {
+  predictor_combinations = combn(all_predictors, subset_size, simplify = FALSE)
+  
+  for (predictor_set in predictor_combinations) {
+    
+    formula_str = paste("rainfall ~", paste(predictor_set, collapse = " + "))
+    formula_obj = as.formula(formula_str)
+    
+    accuracy_results = numeric(100)
+    
+    for (k in 1:100) {
+      knn_fit = knn3(formula_obj, data = train_set, k = k)
+      
+      y_hat_knn = predict(knn_fit, validation_set, type = "class")
+      
+      accuracy = confusionMatrix(y_hat_knn, validation_set$rainfall)$overall["Accuracy"]
+      
+      accuracy_results[k] = accuracy
+    }
+    
+    results_list[[paste(predictor_set, collapse = "_")]] = accuracy_results
+  }
+}
+```
+
+```{r}
+# Find Best Model (lowest misclassification error)
+
+results_df = data.frame(
+  Model = names(results_list),
+  Max_Accuracy = sapply(results_list, max),  
+  Best_k = sapply(results_list, function(acc) which.max(acc))  
+)
+
+top_models = results_df %>%
+  arrange(desc(Max_Accuracy)) %>%
+  head(3)  
+
+print(top_models)
+
+
+# temperature, humidity, cloud, k = 27, misclass = 0.1111
+
+# mintemp, humidity, cloud, k = 33, misclass = 0.1111
+
+# humidity, cloud, temp_range, k = 53, misclass = 0.113
+
+
+```
+
+
+**LDA, QDA, Naive Bayes**
+
+
+```{r}
+# LDA (Iterate through all possible combinations of features)
+
+feature_combinations_lda = list()
+
+for (i in 1:length(features)) {
+  feature_combinations_lda = c(feature_combinations_lda, combn(features, i, simplify = FALSE))
+}
+
+results_lda = data.frame(model = character(), misclassification_rate_lda = numeric(), stringsAsFactors = FALSE)
+
+for (comb_lda in feature_combinations_lda) {
+  
+  formula_lda = as.formula(paste(target, "~", paste(comb_lda, collapse = " + ")))
+  
+  model_lda = lda(formula_lda, data = train_set)
+  
+  predictions_lda = predict(model_lda, newdata = validation_set, type = "response")
+  predicted_classes_lda = ifelse(predictions_lda$posterior[,2] > 0.5, 1, 0)
+  
+  confusion_lda = confusionMatrix(as.factor(predicted_classes_lda), validation_set[[target]])
+  misclassification_rate_lda = 1 - confusion_lda$overall['Accuracy']
+  
+  results_lda = rbind(results_lda, data.frame(model_lda = paste(comb_lda, collapse = ", "), misclassification_rate_lda = misclassification_rate_lda))
+}
+
+```
+
+```{r}
+# Best LDA Model (lowest misclassification error)
+
+best_lda_model = results_lda[which.min(results_lda$misclassification_rate_lda), ]
+print(best_lda_model)
+
+best_lda_model_fit = lda(rainfall ~ pressure + maxtemp + temperature + dewpoint + sunshine + humid_cloud , data = train_data)
+
+summary(best_lda_model_fit)
+```
+
+
+```{r}
+# QDA (Iterate through all possible combinations of features)
+
+feature_combinations_qda = list()
+
+for (i in 1:length(features)) {
+  feature_combinations_qda = c(feature_combinations_qda, combn(features, i, simplify = FALSE))
+}
+
+results_qda = data.frame(model = character(), misclassification_rate_qda = numeric(), stringsAsFactors = FALSE)
+
+for (comb_qda in feature_combinations_qda) {
+  
+  formula_qda = as.formula(paste(target, "~", paste(comb_qda, collapse = " + ")))
+  
+  model_qda = qda(formula_qda, data = validation_set)
+  
+  predictions_qda = predict(model_qda, newdata = validation_set, type = "response")
+  predicted_classes_qda = ifelse(predictions_qda$posterior[,2] > 0.5, 1, 0)
+  
+  confusion_qda = confusionMatrix(as.factor(predicted_classes_qda), validation_set[[target]])
+  misclassification_rate_qda = 1 - confusion_qda$overall['Accuracy']
+  
+  results_qda = rbind(results_qda, data.frame(model_qda = paste(comb_qda, collapse = ", "), misclassification_rate_qda = misclassification_rate_qda))
+}
+
+```
+
+
+```{r}
+# Best QDA Model (lowest misclassification error)
+
+best_qda_model = results_qda[which.min(results_qda$misclassification_rate_qda), ]
+print(best_qda_model)
+
+best_qda_model_fit = qda(rainfall ~ pressure + dewpoint + cloud  , data = train_set)
+
+summary(best_qda_model_fit)
+
+```
+
+
+```{r}
+# Naive Bayes (Iterate through all possible combinations of variables)
+
+features = colnames(train_set)[!colnames(train_set) %in% c("rainfall")]  
+
+feature_combinations_nb = list()
+
+for (i in 1:length(features)) {
+  feature_combinations_nb = c(feature_combinations_nb, combn(features, i, simplify = FALSE))
+}
+
+results_nb = data.frame(model = character(), misclassification_rate_nb = numeric(), stringsAsFactors = FALSE)
+
+for (comb_nb in feature_combinations_nb) {
+  
+  formula_nb = as.formula(paste("rainfall ~", paste(comb_nb, collapse = " + ")))
+  
+  model_nb = naiveBayes(formula_nb, data = train_set)
+  
+  nb_posterior = predict(model_nb, validation_set, type = 'raw')
+  
+  nb_prediction = ifelse(nb_posterior[, 2] > 0.5, 1, 0) 
+  
+  validation_set$rainfall = factor(validation_set$rainfall, levels = c(0, 1))
+  
+  confusion_nb = confusionMatrix(factor(nb_prediction, levels = c(0, 1)), validation_set$rainfall)
+  misclassification_rate_nb = 1 - confusion_nb$overall['Accuracy']
+  
+  results_nb = rbind(results_nb, data.frame(model = paste(comb_nb, collapse = ", "), misclassification_rate_nb = misclassification_rate_nb))
+}
+
+```
+
+```{r}
+# Best Naive Bayes Model (Lowest misclassification error)
+
+best_nb_model = results_nb[which.min(results_nb$misclassification_rate_nb), ]
+print(best_nb_model)
+
+best_nb_model_fit = naiveBayes(rainfall ~ dewpoint + humidity + cloud + sunshine , data = train_data)
+
+```
+
+
+**5 and 10 Fold Cross Validation**
+
+
+```{r}
+# 5 Fold CV
+
+cv_error_5 = rep(NA, length(features))
+
+var_combinations_5CV = unlist(lapply(1:length(features), function(x) combn(features, x, simplify = FALSE)), recursive = FALSE)
+
+for (i in 1:length(var_combinations_5CV)) {
+  current_vars = var_combinations_5CV[[i]]
+  
+  formula_5CV = as.formula(paste("rainfall ~", paste(current_vars, collapse = "+")))
+  
+  # Fit the logistic regression model
+  glm_fit1 = glm(formula_5CV, data = train_set, family = 'binomial')
+  
+  # Calculate cross-validation error using 5-fold cross-validation
+  cv_error_5[i] = cv.glm(train_set, glm_fit1, K=5)$delta[1]
+}
+
+# Find Best 5-Fold CV 
+
+best_model_5CV = which.min(cv_error_5)
+
+best_combination_5CV = var_combinations_5CV[[best_model_5CV]]
+
+best_error_5CV = cv_error_5[best_model_5CV]
+
+best_error_5CV
+
+best_combination_5CV
+```
+
+
+```{r}
+# Fit Best 5 Fold CV 
+
+best_formula_5CV = as.formula(paste("rainfall ~", paste(best_combination_5CV, collapse = "+")))
+
+final_5CV_model = glm(best_formula_5CV, data = train_set, family = 'binomial')
+
+summary(final_5CV_model)
+```
+
+
+```{r}
+# 10 Fold CV
+
+cv_error_10 = rep(NA, length(features))
+
+var_combinations_10CV = unlist(lapply(1:length(features), function(x) combn(features, x, simplify = FALSE)), recursive = FALSE)
+
+for (i in 1:length(var_combinations_10CV)) {
+  current_vars_10CV = var_combinations_10CV[[i]]
+  
+  formula_10CV = as.formula(paste("rainfall ~", paste(current_vars_10CV, collapse = "+")))
+  
+  glm_fit2 = glm(formula_10CV, data = train_set, family = 'binomial')
+  
+  cv_error_10[i] = cv.glm(train_set, glm_fit2, K=10)$delta[1]
+}
+
+# Find Best 10-Fold CV 
+
+best_model_10CV = which.min(cv_error_10)
+
+best_combination_10CV = var_combinations_10CV[[best_model_10CV]]
+
+best_error_10CV = cv_error_10[best_model_10CV]
+
+best_combination_10CV
+
+best_error_10CV
+
+cv_error_10
+
+cv_error_5
+
+```
+
+```{r}
+# Fit Best 10-Fold CV
+
+best_formula_10CV = as.formula(paste("rainfall ~", paste(best_combination_10CV, collapse = "+")))
+
+final_10CV_model = glm(best_formula_10CV, data = train_set, family = 'binomial')
+
+summary(final_10CV_model)
+```
+
+
+**Forward, Backward, Forward-Backward Stepwise Selection**
+
+```{r, eval = FALSE}
+# Forward Selection
+
+null_logit_model = glm(rainfall ~ 1, data = train_data, family = "binomial")
+
+full_logit_model = glm(rainfall ~ ., data = train_data, family = "binomial")
+
+forward_selection_model = stepAIC(null_logit_model, 
+                         scope = list(lower = null_logit_model, upper = full_logit_model), 
+                         direction = "forward", 
+                         trace = 0)  
+```
+
+
+```{r}
+# Preferred Forward Selection Model
+
+preferred_forward_select = glm(rainfall ~ humid_cloud + dewpoint + sunshine + 
+    windspeed + id + cloud + mintemp + pressure, data = train_data, family = "binomial")
+
+summary(preferred_forward_select)
+
+```
+
+
+```{r, eval = FALSE}
+# Backward Selection
+
+backward_selection_model = stepAIC(full_logit_model, 
+                         scope = list(lower = null_logit_model, upper = full_logit_model), 
+                         direction = "backward", 
+                         trace = 0)  
+```
+
+
+```{r}
+# Preferred Backward Selection Model
+
+preferred_backward_select = glm(rainfall ~ id + pressure + mintemp + dewpoint + 
+    cloud + sunshine + windspeed + humid_cloud, data = train_data, family = "binomial")
+
+summary(preferred_backward_select)
+```
+
+
+```{r}
+# Forward-Backward Stepwise Selection
+
+preferred_both_select = stepAIC(null_logit_model, 
+                         scope = list(lower = null_logit_model, upper = full_logit_model), 
+                         direction = "both", 
+                         trace = 0) 
+```
+
+
+```{r}
+# Forward-Backward Selection Yields the same optimal model as Forward Selection
+```
+
+```{r}
+# Calculate Misclassification Error for Each
+
+# Forward
+predictions_forward = predict(preferred_forward_select, newdata = x_validation, type = "response")
+
+predicted_classes_forward = ifelse(predictions_forward > 0.5, 1, 0)
+
+predicted_classes_forward = factor(predicted_classes_forward, levels = c(0, 1))
+y_validation = factor(y_validation, levels = c(0, 1))
+
+confusion_forward = confusionMatrix(predicted_classes_forward, y_validation)
+misclassification_rate_forward = 1 - confusion_forward$overall['Accuracy']
+
+misclassification_rate_forward
+
+
+# Backward
+
+predictions_backward = predict(preferred_backward_select, newdata = x_validation, type = "response")
+
+predicted_classes_backward = ifelse(predictions_backward > 0.5, 1, 0)
+
+predicted_classes_backward = factor(predicted_classes_backward, levels = c(0, 1))
+y_validation = factor(y_validation, levels = c(0, 1))
+
+confusion_backward = confusionMatrix(predicted_classes_backward, y_validation)
+misclassification_rate_backward = 1 - confusion_backward$overall['Accuracy']
+
+misclassification_rate_backward
+```
+
+
+**Ridge and Lasso Regression**
+
+```{r}
+# Preprocessing for Lasso and Ridge
+
+x = model.matrix(rainfall ~ ., train_data)[, -1]
+y =  train_data$rainfall
+dim(x)
+
+```
+
+
+```{r}
+# Ridge Regression
+
+grid = 10^seq(10, -4, length = 100)
+
+ridge_model = glmnet(x, y, family = "binomial", alpha = 0, lambda = grid)
+
+min(abs(coef(ridge_model)))
+
+coef(ridge_model)[1:5,1:5]
+
+```
+
+
+```{r}
+plot(log(ridge_model$lambda), coef(ridge_model)[2,] / sd(coef(ridge_model)[2,]), 
+     type = 'l', col = 2, ylim = c(-4, 4))
+for(i in 3:nrow(coef(ridge_model))) {
+  lines(log(ridge_model$lambda), coef(ridge_model)[i,] / sd(coef(ridge_model)[i,]), 
+        col = i)
+}
+```
+
+```{r}
+set.seed(1829)
+cv_out = cv.glmnet(x, y, alpha=0)
+plot(cv_out)
+
+bestlam = cv_out$lambda.min
+bestlam
+```
+
+
+```{r}
+# Ridge Predictions
+
+ridge_pred = predict(ridge_model, as.matrix(train_data[, -5]), s = bestlam, type = "response")
+
+ridge_pred_class = ifelse(ridge_pred > 0.5, 1, 0)
+
+conf_matrix_ridge = confusionMatrix(factor(ridge_pred_class), factor(y_validation))
+
+misclassification_error_ridge = 1 - conf_matrix_ridge$overall['Accuracy']
+
+misclassification_error_ridge
+
+```
+
+```{r}
+# Lasso Regression
+
+lasso_model = glmnet(x, y, family = "binomial", alpha = 1)
+
+plot(lasso_model, xvar = "dev", label = TRUE)
+
+```
+
+```{r}
+cvfit = cv.glmnet(x, y, family = "binomial", type.measure = "class")
+
+plot(cvfit)
+
+bestlam_lasso = cvfit$lambda.min
+bestlam_lasso
+
+```
+
+
+```{r}
+# Lasso Predictions
+
+lasso_pred = predict(lasso_model, as.matrix(train_data[, -5]), s = bestlam_lasso, type = "response")
+
+lasso_pred_class = ifelse(lasso_pred > 0.5, 1, 0)
+
+conf_matrix_lasso = confusionMatrix(factor(lasso_pred_class), factor(y_validation))
+
+misclassification_error_lasso = 1 - conf_matrix_lasso$overall['Accuracy']
+
+misclassification_error_lasso
+```
+
+
+**Random Forest**
+
+
+```{r}
+
+rf_model = randomForest(rainfall ~ ., data = train_data, ntree = 100)
+
+pred_rf = predict(rf_model, validation_set, type = "response")
+
+pred_rf2 = predict(rf_model, train_data, type = "response")
+
+actual_rf = train_data$rainfall
+
+misclass_rf = mean(pred_rf != actual_rf)
+print(paste("Random Forest Error Rate:", round(misclass_rf, 4)))
+
+
+```
+
+
+**XG Boost**
+
+
+```{r}
+train_data$rainfall = as.numeric(train_data$rainfall)
+validation_set$rainfall = as.numeric(validation_set$rainfall) 
+
+train_matrix = model.matrix(rainfall ~ . -1, data = train_data)
+train_label = train_data$rainfall
+
+test_matrix = model.matrix(rainfall ~ . -1, data = validation_set)
+
+xgb_model = xgboost(data = train_matrix, label = train_label, objective = "binary:logistic", nrounds = 100)
+
+pred_xgb = predict(xgb_model, test_matrix)
+pred_class = ifelse(pred_xgb > 0.5, 1, 0)
+
+actual_xgb = validation_set$rainfall
+
+misclass_xgb = mean(pred_class != actual_xgb)
+print(paste("XGBoost Error Rate:", round(misclass_xgb, 4)))
+```
+
+
+
+**Preferred Models Predictions on Test Data and Export as CSV to Submit to Kaggle**
+
+
+```{r}
+# Logistic
+predicted_probs_best_logistic = predict(best_logistic_model_fit, newdata = test_data, type = "response")
+
+best_logistic_kaggle = data.frame(id = test_data$id, rainfall = predicted_probs_best_logistic)
+
+write.csv(best_logistic_kaggle, file = "logistic_kaggle.csv", row.names = FALSE)
+
+```
+
+```{r}
+# KNN
+
+# Model 1
+knn_fit1= knn3(rainfall ~ temperature + humidity + cloud, data = train_data, k = 27)
+
+predicted_probs = predict(knn_fit1, test_data, type = "prob")
+
+results_df1 = data.frame(id = test_data$id, rainfall = predicted_probs[, 2])
+
+write.csv(results_df1, "knn_predictions1.csv", row.names = FALSE)
+
+# Model 2
+
+knn_fit2 = knn3(rainfall ~ mintemp + humidity + cloud, data = train_data, k = 33)
+
+predicted_probs2 = predict(knn_fit2, test_data, type = "prob")
+
+results_df2 = data.frame(id = test_data$id, rainfall = predicted_probs2[, 2])
+
+write.csv(results_df2, "knn_predictions2.csv", row.names = FALSE)
+
+# Model 3
+
+knn_fit3 = knn3(rainfall ~ temp_range + humidity + cloud, data = train_data, k = 53)
+
+predicted_probs3 = predict(knn_fit3, test_data, type = "prob")
+
+results_df3 = data.frame(id = test_data$id, rainfall = predicted_probs3[, 2])
+
+write.csv(results_df3, "knn_predictions3.csv", row.names = FALSE)
+
+```
+
+
+
+```{r}
+# LDA
+
+predicted_probs_best_lda = predict(best_lda_model_fit, newdata = test_data, type = "response")
+
+best_lda_kaggle = data.frame(id = test_data$id, rainfall = predicted_probs_best_lda)
+
+write.csv(best_lda_kaggle, file = "lda_kaggle.csv", row.names = FALSE)
+```
+
+```{r}
+# QDA
+
+predicted_probs_best_qda = predict(best_qda_model_fit, newdata = test_data, type = "response")
+
+best_qda_kaggle = data.frame(id = test_data$id, rainfall = predicted_probs_best_qda)
+
+write.csv(best_qda_kaggle, file = "qda_kaggle.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+# Naive Bayes
+
+predicted_probs_best_nb = predict(best_nb_model_fit, newdata = test_data, type = "raw")
+
+best_nb_kaggle = data.frame(id = test_data$id, rainfall = predicted_probs_best_nb)
+
+write.csv(best_nb_kaggle, file = "nb_kaggle.csv", row.names = FALSE)
+```
+
+
+```{r}
+# 5CV
+
+predicted_probs_best_5CV = predict(final_5CV_model, newdata = test_data, type = "response")
+
+best_5CV_kaggle = data.frame(id = test_data$id, rainfall = predicted_probs_best_5CV)
+
+write.csv(best_5CV_kaggle, file = "5CV_kaggle.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+# 10CV
+
+predicted_probs_best_10CV = predict(final_10CV_model, newdata = test_data, type = "response")
+
+best_10CV_kaggle = data.frame(id = test_data$id, rainfall = predicted_probs_best_10CV)
+
+write.csv(best_10CV_kaggle, file = "10CV_kaggle.csv", row.names = FALSE)
+```
+
+
+```{r}
+# Forward Select
+
+predicted_probs_best_forward = predict(preferred_forward_select, newdata = test_data, type = "response")
+
+best_forward_kaggle = data.frame(id = test_data$id, rainfall = predicted_probs_best_forward)
+
+write.csv(best_forward_kaggle, file = "forward_kaggle.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+# Backward Select
+
+predicted_probs_best_backward = predict(preferred_backward_select, newdata = test_data, type = "response")
+
+best_backward_kaggle = data.frame(id = test_data$id, rainfall = predicted_probs_best_backward)
+
+write.csv(best_backward_kaggle, file = "backward_kaggle.csv", row.names = FALSE)
+
+```
+
+```{r}
+# Ridge
+
+best_ridge_kaggle = data.frame(id = test_data$id, rainfall = ridge_pred)
+
+write.csv(best_ridge_kaggle, file = "ridge_kaggle.csv", row.names = FALSE)
+```
+
+
+```{r}
+# RF
+
+best_rf_kaggle = data.frame(id = test_data$id, rainfall = pred_rf2)
+
+write.csv(best_rf_kaggle, file = "rf_kaggle.csv", row.names = FALSE)
+```
+
+
+**Build Tables for Report**
+
+
+```{r}
+# Table 1
+
+table_data = data.frame(
+  Algorithm = c("Logistic", "kNN", "kNN", "kNN", "LDA", "QDA", "Naive Bayes", "5-Fold Cross-Validation†", 
+                "10-Fold Cross-Validation", "Forward Select", "Ridge", "Random Forest"),
+  Model = c(
+    "*Rainfall* ~ MaxTemp + Sunshine + Humid_Cloud",
+    "*Rainfall* ~ Temperature + Humidity + Cloud",
+    "*Rainfall* ~ MinTemp + Humidity + Cloud",
+    "*Rainfall* ~ Humidity + Cloud + Temperature Range",
+    "*Rainfall* ~ Pressure + MaxTemp + Temperature + Dewpoint, Sunshine, Humid_Cloud",
+    "*Rainfall* ~ Pressure + Dewpoint + Cloud",
+    "*Rainfall* ~ Dewpoint + Humidity + Cloud + Sunshine",
+    "*Rainfall* ~ Pressure + Sunshine + Humid_Cloud",
+    "*Rainfall* ~ ID + Day + Dewpoint + Sunshine + 
+    Wind Speed + Humid_Cloud",
+    "*Rainfall* ~ Humid_Cloud + Dewpoint + Sunshine + 
+    Wind Speed + ID + Cloud + MinTemp + Pressure",
+    "*Rainfall* ~  ID + Day + Pressure",
+    "*Rainfall* ~ All Predictors"
+  ),
+  Remarks = c("", "k = 27", "k = 33", "k = 53", "", "", "", "", "", "Stepwise", "λ = 0.0276", "100 Trees"),
+  Error = c(0.128, 0.111, 0.111, 0.112, 0.135, 0.143, 0.146, 0.105, 0.102, 0.124, 0.247, 0.355),
+  ROC_score = c(0.894, 0.893, 0.891, 0.886, 0.893, 0.885, 0.884, 0.896, 0.890, 0.893, 0.544, 0.555)
+)
+
+pub_table = kable(table_data, format = "html", escape = FALSE, 
+                    col.names = c("Algorithm", "Model", "Remarks", "Error*", "Kaggle Score**")) %>%
+  kable_styling("striped", full_width = FALSE) %>%
+  row_spec(8, background = "#d9ead3") %>%
+  column_spec(2, width = "30em") %>%
+  add_footnote("*Misclassification error* \n **ROC score (Higher score = better) \n †Preferred final model")
+ 
+pub_table
+```
+
+
+
+
+
