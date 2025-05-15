@@ -9,14 +9,23 @@ This is a machine learning project that aims to predict the existence of rainfal
 
 **Methods Used:** Over 800,000 models run 
 
+
 -> Logistic Regression
+
 -> K-Nearest Neighbors
+
 -> XG Boost
+
 -> Random Forest
+
 -> Forward, Backward, and Stepwise Selection
+
 -> Lasso and Ridge Regression
+
 -> 5 and 10 Fold Cross Validation
+
 -> LDA, QDA, and Naive Bayes
+
 -> Feature Engineering guided by a Literature Review
 
 
